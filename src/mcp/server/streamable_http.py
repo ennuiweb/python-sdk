@@ -318,6 +318,31 @@ class StreamableHTTPServerTransport:
             self._sse_stream_writers.pop(request_id, None)
             await self._clean_up_memory_streams(request_id)
 
+    async def _run_response_with_cleanup(
+        self,
+        response: Callable[[Scope, Receive, Send], Awaitable[None]],
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        request_id: RequestId,
+    ) -> None:
+        """Run an SSE response and release per-request state when it exits.
+
+        Reverse proxies can close an upstream connection without that disconnect
+        cancelling ``EventSourceResponse``'s data-sender task.  In that case the
+        data sender remains blocked on an in-memory request stream and the ASGI
+        request never returns.  Closing both sides here wakes the blocked writer;
+        all operations are idempotent because the writer has the same cleanup in
+        its own ``finally`` block.
+        """
+        try:
+            await response(scope, receive, send)
+        finally:
+            await self._clean_up_memory_streams(request_id)
+            writer = self._sse_stream_writers.pop(request_id, None)
+            if writer is not None:
+                await writer.aclose()
+
     def _create_error_response(
         self,
         error_message: str,
@@ -636,7 +661,14 @@ class StreamableHTTPServerTransport:
                 try:
                     # First send the response to establish the SSE connection
                     async with anyio.create_task_group() as tg:
-                        tg.start_soon(response, scope, receive, send)
+                        tg.start_soon(
+                            self._run_response_with_cleanup,
+                            response,
+                            scope,
+                            receive,
+                            send,
+                            request_id,
+                        )
                         # Then send the message to be processed by the server
                         session_message = self._create_session_message(message, request, request_id, protocol_version)
                         await writer.send(session_message)

@@ -114,3 +114,58 @@ async def test_priming_store_failure_leaves_no_per_request_state() -> None:
     assert sent[0]["status"] == 500
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     assert b"backend unavailable" not in body
+
+
+@pytest.mark.anyio
+async def test_response_completion_releases_parked_sse_writer_state() -> None:
+    """An early response exit must wake a writer parked on its memory stream.
+
+    This models a reverse proxy ending the response before the server routes a
+    terminal JSON-RPC message.  Without response-owned cleanup the request and
+    SSE streams remain registered indefinitely.
+    """
+    transport = StreamableHTTPServerTransport(
+        mcp_session_id="sid",
+        is_json_response_enabled=False,
+    )
+    request_id = "req-early-exit"
+    request_send, request_receive = anyio.create_memory_object_stream[EventMessage](REQUEST_STREAM_BUFFER_SIZE)
+    sse_send, sse_receive = anyio.create_memory_object_stream[dict[str, object]](0)
+    transport._request_streams[request_id] = (request_send, request_receive)
+    transport._sse_stream_writers[request_id] = sse_send
+
+    async def response_returns(
+        _scope: Scope,
+        _receive,
+        _send,
+    ) -> None:
+        return
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def send(_message: Message) -> None:
+        return
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "query_string": b"",
+        "headers": [],
+    }
+
+    await transport._run_response_with_cleanup(
+        response_returns,
+        scope,
+        receive,
+        send,
+        request_id,
+    )
+
+    assert transport._request_streams == {}
+    assert transport._sse_stream_writers == {}
+    assert request_send.statistics().open_send_streams == 0
+    assert request_receive.statistics().open_receive_streams == 0
+    assert sse_send.statistics().open_send_streams == 0
+    await sse_receive.aclose()
