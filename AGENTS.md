@@ -19,7 +19,6 @@
 - Preserve upstream tests and add a regression test for every local transport change.
 - Never add credentials, deployment secrets, or Oskar-specific runtime configuration to this SDK fork.
 - `CLAUDE.md` is upstream's development guide and stays upstream-owned; follow it (uv only, never pip; `uv run --frozen pytest`, `uv run --frozen ruff check .`, `uv run --frozen pyright`). Some test modules need optional extras such as `websockets`.
-- Check the current maintenance branch (`git branch --show-current`, e.g. `oskar/session-cleanup-v1.28.1`) before committing; never commit fork fixes to `main`.
 
 ## Local Context Map
 
